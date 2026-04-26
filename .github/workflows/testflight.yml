@@ -1,0 +1,88 @@
+name: TestFlight Release (iOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: EAS build profile
+        type: choice
+        options: [production, preview]
+        default: production
+      auto_submit:
+        description: Submit to TestFlight after build
+        type: boolean
+        default: true
+
+concurrency:
+  group: testflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Write ASC API key file
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8" >> "$GITHUB_ENV"
+
+      - name: Patch fork identifiers
+        env:
+          IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
+          EXPO_OWNER: ${{ secrets.EXPO_OWNER }}
+          EAS_PROJECT_ID: ${{ secrets.EAS_PROJECT_ID }}
+          ASC_APP_ID: ${{ secrets.ASC_APP_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: node scripts/ci/patch-fork-ids.cjs
+
+      - name: Show patched diffs (sanity)
+        run: |
+          echo "::group::app.config.js (production block)"
+          grep -nE 'production:|owner:|projectId:|expo\.dev/' packages/happy-app/app.config.js || true
+          echo "::endgroup::"
+          echo "::group::eas.json submit.production"
+          node -e "console.log(JSON.stringify(require('./packages/happy-app/eas.json').submit.production, null, 2))"
+          echo "::endgroup::"
+
+      - name: Run EAS build (and optionally submit)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          # Lets EAS refresh provisioning profiles non-interactively if needed.
+          # Initial dist cert + profile must already be seeded via `eas credentials`.
+          EXPO_ASC_API_KEY_PATH: ${{ env.ASC_KEY_PATH }}
+          EXPO_ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          EXPO_ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          EXPO_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
+        working-directory: packages/happy-app
+        run: |
+          AUTO_SUBMIT_FLAG=""
+          if [ "${{ inputs.auto_submit }}" = "true" ]; then
+            AUTO_SUBMIT_FLAG="--auto-submit-with-profile=${{ inputs.profile }}"
+          fi
+          npx --yes eas-cli@latest build \
+            --platform ios \
+            --profile ${{ inputs.profile }} \
+            --non-interactive \
+            --no-wait \
+            $AUTO_SUBMIT_FLAG
+
+      - name: Cleanup ASC key
+        if: always()
+        run: rm -f "$ASC_KEY_PATH"
